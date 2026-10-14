@@ -3,6 +3,7 @@ name = "friends"
 version = "0.1.0"
 description = "Local-first CLI for keeping in touch with the people who matter."
 readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "typer>=0.12",
