@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+*.db
+friends_export.csv
+friends_template.csv
+
+# Personal data – keep your own spreadsheet export out of version control
+/friends.csv
