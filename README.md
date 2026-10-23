@@ -1,6 +1,12 @@
-# friends
+```text
+  ██▀▀▀  ██▀▀█▄  ▀█▀  ██▀▀▀  ██▄  ██  ██▀▀█▄  ▄█▀▀▀
+  ██▄▄   ██▄▄█▀░  █░  ██▄▄   ██▀█▄██░ ██░ ██░ ▀█▄▄
+  ██░░░  ██░▀█▄   █░  ██░░░  ██░ ▀██░ ██░ ██░   ░██
+  ██░    ██░ ██░ ▄█▄  ██▄▄▄  ██░  ██░ ██▄▄█▀░ ▄▄▄█▀░
+   ░░     ░░  ░░  ░░░  ░░░░░  ░░   ░░  ░░░░░   ░░░░   
+```
 
-A local-first command-line tool for keeping in touch with the 30–60 people who matter, wherever they live.
+A local-first command-line tool for keeping in touch with the people who matter, wherever they live.
 
 It tells you who you haven't contacted in too long relative to how often you *want* to contact them. Everything runs locally in one SQLite file. There's no account, no cloud and no network access.
 
@@ -151,7 +157,12 @@ Run `friends help` for an overview. To see options:
 | `friends import [FILE] [--dry-run] [--ignore-older]` | Import or merge a CSV. Defaults to `./friends.csv`. |
 | `friends export [-o friends_export.csv] [--with-ids] [--european] [--force]` | Export all friends in the import format. `Last contact` is the effective last contact. |
 | `friends export-template [-o friends_template.csv] [--force]` | Write an empty CSV with the exact headers. |
-| `friends path` | Print the database location. |
+| `friends path [NEW]` | Print the database location, or move the database there. |
+| `friends snapshot [--file PATH]` | Write the YAML snapshot of everything; `--file` also remembers where it lives. |
+| `friends restore [FILE] [-y]` | Replace the database with a snapshot. |
+| `friends autocommit [off\|on\|push]` | Git-commit the snapshot after every change. |
+| `friends style [plain\|shadow\|big]` | Show or switch the banner style. |
+| `friends color [blue\|peach\|honey\|sunset]` | Show or switch the colour palette (`colour` works too). |
 | `friends options [COMMAND]` | List the options of every command, or of one. |
 | `friends help [COMMAND]` | Command overview, or the full help page of one command. |
 
@@ -186,7 +197,63 @@ friends path
 | Linux   | `~/.local/share/friends/friends.db` |
 | Windows | `%LOCALAPPDATA%\friends\friends.db` |
 
-Set `FRIENDS_DB=/some/path/friends.db` to use a different file, for example a synced folder or a test database.
+Set `FRIENDS_DB=/some/path/friends.db` to use a different file for one run, for example a test
+database. To move the database for good, for example into a synced folder:
+
+```bash
+friends path ~/Sync/friends.db     # copies the current file there if it doesn't exist yet
+```
+
+Settings such as that path, the snapshot file, autocommit and the theme live in
+`settings.yaml` in the same directory as the default database. `FRIENDS_CONFIG=/some/file`
+overrides it for one run.
+
+## Keeping your data in a private repo
+
+The database is binary, so it makes a poor git history. Instead, `friends` can keep a
+human-readable YAML **snapshot** of everything next to it and commit that after every change.
+A tidy setup is a public tool repo plus a private data repo cloned into `data/`, which is
+gitignored here:
+
+```bash
+gh repo create friends-data --private
+git clone git@github.com:<you>/friends-data.git data
+friends snapshot --file ~/Code/_tools/friends/data/friends.yaml   # write it and remember the path
+friends autocommit on                                             # or: push
+```
+
+From then on every `log`, `add`, `edit`, `remove`, `snooze`, `undo` and `import` rewrites the
+snapshot and commits it with a message like `friends log Sophie: call`. Only the snapshot file
+is committed; other changes in that repo are left alone. A failed commit or push is shown as a
+warning and never undoes the change itself.
+
+The snapshot looks like this, one friend per item with their contacts underneath, oldest
+first. It is fine to edit by hand:
+
+```yaml
+- name: Sophie
+  id: 3f2a9c1e-…
+  group: Close friends
+  location: Berlin
+  interval: 21               # only written when it differs from the group default
+  snoozed_until: 2026-12-01
+  contacts:
+    - {date: 2026-06-10, type: imported}
+    - {date: 2026-09-01, type: meeting, note: "dinner"}
+    - {date: 2026-10-23 18:30:15, type: call}
+```
+
+To rebuild the database from it, on a new machine or after a mistake:
+
+```bash
+friends restore                              # from the configured snapshot (asks first)
+friends restore ~/Downloads/friends.yaml     # from any file
+git -C data checkout HEAD~3 -- friends.yaml && friends restore   # from an older revision
+```
+
+A restore replaces everything in the database. Friend IDs survive, imported contacts keep
+their deterministic IDs so CSV re-imports stay idempotent, and other interaction IDs are
+regenerated. Friend `created_at`/`updated_at` timestamps are not kept.
 
 ## Backup and restore
 
@@ -201,6 +268,9 @@ sqlite3 "$(friends path)" ".backup '$HOME/Backups/friends.db'"
 
 # 3. Human-readable CSV (profiles + last contact, not the full history)
 friends export -o ~/Backups/friends-$(date +%F).csv --with-ids
+
+# 4. Human-readable YAML with the full history (see "Keeping your data in a private repo")
+friends snapshot --file ~/Backups/friends.yaml
 ```
 
 To restore:
@@ -211,9 +281,29 @@ cp ~/Backups/friends-2026-10-11.db "$(friends path)"
 
 # from a CSV backup: import into a fresh or existing database
 friends import ~/Backups/friends-2026-10-11.csv
+
+# from a YAML snapshot: replace the database with it
+friends restore ~/Backups/friends.yaml
 ```
 
-A file copy keeps the complete interaction history. A CSV keeps only the latest contact per friend.
+A file copy or a YAML snapshot keeps the complete interaction history. A CSV keeps only the
+latest contact per friend.
+
+## Banner and colours
+
+`friends next`, `friends digest` and `friends help` start with a small FRIENDS banner. Three
+styles: `plain` (default), `shadow` and `big`. Four palettes: `blue`, `peach`, `honey` and
+`sunset`. The palette only changes the chrome (banner, rules, table titles and headers);
+overdue red, due-soon yellow, on-track green and snoozed blue stay the same everywhere.
+
+```sh
+friends style            # show the current style and the available ones
+friends style big        # switch: plain | shadow | big
+friends color            # show the current palette
+friends color peach      # switch: blue | peach | honey | sunset   (`friends colour` works too)
+```
+
+The palettes live in the `THEMES` dictionary at the top of `src/friends/ui.py`.
 
 ## Development
 
@@ -225,6 +315,7 @@ uv run friends next          # run from source
 # try things against a throwaway database
 FRIENDS_DB=/tmp/demo.db uv run friends import examples/sample_friends.csv
 FRIENDS_DB=/tmp/demo.db FRIENDS_TODAY=2026-12-01 uv run friends digest   # pretend it's another day
+FRIENDS_CONFIG=/tmp/demo-settings.yaml uv run friends color peach          # keep settings out of the real file
 ```
 
 ### Architecture
@@ -238,7 +329,10 @@ src/friends/
   ranking.py       priority engine (pure functions over FriendStatus)
   csv_io.py        CSV parsing, import reconciliation, export
   digest.py        weekly digest data + Markdown rendering
-  ui.py            Rich rendering (tables, panels, help)
+  snapshot.py      YAML snapshot: dump, parse, restore
+  sync.py          after every change: rewrite the snapshot, optionally git commit/push it
+  settings.py      settings.yaml: db and snapshot paths, autocommit, style, colour
+  ui.py            Rich rendering (tables, panels, help, banner and themes)
   cli.py           Typer commands – thin glue
   dates.py, names.py, clock.py, errors.py
 ```

@@ -10,13 +10,15 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from friends.models import Base
+from friends.settings import load_settings
 
 APP_NAME = "friends"
 SCHEMA_VERSION = 1
 
 
 def default_db_path() -> Path:
-    """``$FRIENDS_DB`` if set, else the platform's user data directory.
+    """``$FRIENDS_DB`` if set, else the path saved with ``friends path``, else the
+    platform's user data directory.
 
     macOS:   ~/Library/Application Support/friends/friends.db
     Linux:   ~/.local/share/friends/friends.db
@@ -25,6 +27,9 @@ def default_db_path() -> Path:
     override = os.environ.get("FRIENDS_DB")
     if override:
         return Path(override).expanduser()
+    configured = load_settings().get("db")
+    if configured:
+        return Path(configured).expanduser()
     return Path(platformdirs.user_data_dir(APP_NAME, appauthor=False)) / "friends.db"
 
 

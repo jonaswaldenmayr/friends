@@ -13,9 +13,137 @@ from friends.csv_io import ImportReport
 from friends.digest import Digest
 from friends.models import Friend, Interaction, Source
 from friends.ranking import FriendStatus, Recommendations
+from friends.settings import load_settings
 
 console = Console()
 err_console = Console(stderr=True)
+
+
+# --------------------------------------------------------------------------
+# Theme and banner. Colours live here only; pick a palette with `friends color`.
+# Status colours (overdue red, due-soon yellow, on-track green, snoozed blue)
+# are semantic and stay the same in every palette.
+# --------------------------------------------------------------------------
+
+THEMES = {
+    "blue": {
+        "banner": ["#a6d0ff", "#7aa2f7", "#4f7bd9", "#2f4f9e"],  # one shade per banner row, top to bottom
+        "shadow": "#8a8f98",
+        "rule": "#273b6b",
+        "subtitle": "#4f7bd9",
+        "title": "bold #a6d0ff",
+        "header": "#7aa2f7",
+        "accent": "bold #7aa2f7",
+        "border": "#2f4f9e",
+    },
+    "peach": {
+        "banner": ["#fff1e6", "#ffd3b3", "#ffb380", "#f28c4b"],
+        "shadow": "#8a8f98",
+        "rule": "#6b4a35",
+        "subtitle": "#ffb380",
+        "title": "bold #ffd3b3",
+        "header": "#ffb380",
+        "accent": "bold #ffb380",
+        "border": "#b8673a",
+    },
+    "honey": {
+        "banner": ["#fff7d6", "#ffe9a3", "#ffd766", "#e6b422"],
+        "shadow": "#8a8f98",
+        "rule": "#6b5a1f",
+        "subtitle": "#ffd766",
+        "title": "bold #ffe9a3",
+        "header": "#ffd766",
+        "accent": "bold #ffd766",
+        "border": "#a8841a",
+    },
+    "sunset": {
+        "banner": ["#fff1c9", "#ffd3a3", "#ffab8a", "#f07f8f"],
+        "shadow": "#8a8f98",
+        "rule": "#6b4040",
+        "subtitle": "#ffab8a",
+        "title": "bold #ffd3a3",
+        "header": "#ffab8a",
+        "accent": "bold #ffab8a",
+        "border": "#b85c6a",
+    },
+}
+DEFAULT_COLOR = "blue"
+
+# "FRIENDS" as pixel fonts; row pairs become half-block characters.
+BIG = [  # 8 rows -> 4 lines
+    "#####..#####...###..#####..##...##..#####....####.",
+    "##.....##..##...#...##.....###..##..##..##..##....",
+    "##.....##..##...#...##.....####.##..##..##..##....",
+    "####...#####....#...####...##.####..##..##...###..",
+    "##.....##.##....#...##.....##..###..##..##.....##.",
+    "##.....##..##...#...##.....##...##..##..##.....##.",
+    "##.....##..##...#...##.....##...##..##..##.....##.",
+    "##.....##..##..###..#####..##...##..#####...####..",
+]
+SMALL = [  # 5 rows -> 3 lines
+    "####.###..###.####.#..#.###..####",
+    "#....#..#..#..#....##.#.#..#.#...",
+    "###..###...#..###..#.##.#..#..##.",
+    "#....#.#...#..#....#..#.#..#....#",
+    "#....#..#.###.####.#..#.###..###.",
+]
+# name -> (pixels, drop-shadow offset or None). Switch with `friends style`.
+STYLES = {"plain": (SMALL, None), "shadow": (SMALL, (1, 1)), "big": (BIG, (1, 2))}
+DEFAULT_STYLE = "plain"
+
+
+def theme() -> dict:
+    return THEMES.get(load_settings().get("color", ""), THEMES[DEFAULT_COLOR])
+
+
+def _cells(pixels: list[str], shadow: tuple[int, int] | None) -> list[list[tuple[str, bool]]]:
+    """Lines of (character, is_shadow) cells."""
+    dx, dy = shadow or (0, 0)
+    height = len(pixels) + dy
+    grid = [[" "] * (len(pixels[0]) + dx) for _ in range(height + height % 2)]
+    for mark, ox, oy in (("s", dx, dy), ("#", 0, 0)):
+        for y, row in enumerate(pixels):
+            for x, px in enumerate(row):
+                if px == "#":
+                    grid[y + oy][x + ox] = mark
+
+    def cell(top: str, bottom: str) -> tuple[str, bool]:
+        if "#" in (top, bottom):
+            return " ▀▄█"[(top == "#") + 2 * (bottom == "#")], False
+        return ("░" if bottom == "s" else " "), True  # only the lower half casts a shadow
+
+    return [[cell(t, b) for t, b in zip(top, bottom)] for top, bottom in zip(grid[::2], grid[1::2])]
+
+
+def banner(subtitle: str) -> None:
+    """The FRIENDS logo with a context line beside it (or in the rule below when narrow)."""
+    t = theme()
+    pixels, shadow = STYLES.get(load_settings().get("style", ""), STYLES[DEFAULT_STYLE])
+    lines, shades = _cells(pixels, shadow), t["banner"]
+    beside = len(lines[0]) + 5 + len(subtitle) <= console.width
+    console.print()
+    for i, cells in enumerate(lines):
+        line = Text("  ")
+        for char, is_shadow in cells:
+            line.append(char, style=t["shadow"] if is_shadow else shades[min(i, len(shades) - 1)])
+        if beside and i == len(lines) - 1:
+            line.append("   " + subtitle, style=t["subtitle"])
+        console.print(line)
+    rule = Text(style=t["rule"])
+    if not beside:
+        rule.append("── ")
+        rule.append(subtitle, style=t["subtitle"])
+        rule.append(" ")
+    rule.append("─" * max(0, console.width - len(rule)))
+    console.print(rule)
+    console.print()
+
+
+def _table(title: str | None = None, *, box_style=box.SIMPLE_HEAVY, **kwargs) -> Table:
+    t = theme()
+    return Table(
+        box=box_style, title=title, title_justify="left", title_style=t["title"], header_style=t["header"], **kwargs
+    )
 
 
 # --------------------------------------------------------------------------
@@ -84,9 +212,10 @@ def error(message: str) -> None:
 # --------------------------------------------------------------------------
 
 
-def render_next(recs: Recommendations, *, show_snoozed: bool, title: str) -> None:
+def render_next(recs: Recommendations, *, show_snoozed: bool, subtitle: str) -> None:
+    banner(subtitle)
     if recs.ranked:
-        table = Table(title=title, box=box.SIMPLE_HEAVY, title_justify="left", title_style="bold")
+        table = _table()
         table.add_column("#", justify="right", style="dim")
         table.add_column("Friend", style="bold")
         table.add_column("Group")
@@ -136,7 +265,7 @@ def render_next(recs: Recommendations, *, show_snoozed: bool, title: str) -> Non
 
 
 def render_list(statuses: list[FriendStatus], *, show_ids: bool = False) -> None:
-    table = Table(box=box.SIMPLE_HEAVY, title=f"{len(statuses)} friends", title_justify="left", title_style="bold")
+    table = _table(f"{len(statuses)} friends")
     table.add_column("Friend", style="bold")
     table.add_column("Group")
     table.add_column("Location")
@@ -163,7 +292,7 @@ def render_list(statuses: list[FriendStatus], *, show_ids: bool = False) -> None
 
 
 def history_table(interactions: list[Interaction], *, show_friend: bool, title: str | None = None) -> Table:
-    table = Table(box=box.SIMPLE, title=title, title_justify="left", title_style="bold")
+    table = _table(title, box_style=box.SIMPLE)
     table.add_column("Date")
     if show_friend:
         table.add_column("Friend", style="bold")
@@ -220,7 +349,7 @@ def render_profile(friend: Friend, status: FriendStatus, interactions: list[Inte
         body += [Text(""), history_table(interactions, show_friend=False, title=f"History ({len(interactions)})")]
     else:
         body += [Text(""), Text("No interactions recorded yet.", style="dim")]
-    console.print(Panel(RenderGroup(*body), title=f"[bold]{friend.name}[/]", title_align="left", border_style="cyan", expand=False))
+    console.print(Panel(RenderGroup(*body), title=f"[bold]{friend.name}[/]", title_align="left", border_style=theme()["border"], expand=False))
 
 
 # --------------------------------------------------------------------------
@@ -251,11 +380,11 @@ def render_import(report: ImportReport) -> None:
     title = "Import summary" + (" (dry run)" if report.dry_run else "")
     if report.path:
         title += f" · {report.path.name}"
-    console.print(Panel(summary, title=title, title_align="left", border_style="cyan", expand=False))
+    console.print(Panel(summary, title=title, title_align="left", border_style=theme()["border"], expand=False))
 
     changed = [r for r in report.rows if r.action in {"created", "updated"}]
     if changed:
-        table = Table(box=box.SIMPLE, title="Changes", title_justify="left", title_style="bold")
+        table = _table("Changes", box_style=box.SIMPLE)
         table.add_column("Line", justify="right", style="dim")
         table.add_column("Friend", style="bold")
         table.add_column("Action")
@@ -294,14 +423,15 @@ def render_import(report: ImportReport) -> None:
 
 
 def render_digest(d: Digest) -> None:
-    console.rule(f"[bold]Friends digest · {d.today:%A %d %B %Y}[/]")
+    banner(f"digest · {d.today:%A %d %B %Y}")
     console.print(
         f"[dim]{d.total} friends · [green]{d.on_track} on track[/] · [red]{len(d.overdue)} overdue[/] · "
         f"{len(d.unknown)} unknown · {d.snoozed_count} snoozed[/]\n"
     )
 
     if d.overdue:
-        table = Table(box=box.SIMPLE_HEAVY, title="Reach out this week", title_justify="left", title_style="bold red")
+        table = _table("Reach out this week")
+        table.title_style = "bold red"
         table.add_column("#", justify="right", style="dim")
         table.add_column("Friend", style="bold")
         table.add_column("Group")
@@ -376,9 +506,19 @@ HELP_SECTIONS: list[tuple[str, list[tuple[str, str, str]]]] = [
         ],
     ),
     (
+        "Setup",
+        [
+            ("path", "Show or move the database file", "friends path ~/Sync/friends.db"),
+            ("snapshot", "Write the YAML snapshot (and set where it lives)", "friends snapshot --file data/friends.yaml"),
+            ("restore", "Rebuild the database from the snapshot", "friends restore"),
+            ("autocommit", "Commit the snapshot after every change", "friends autocommit on"),
+            ("style", "Banner style: plain, shadow or big", "friends style big"),
+            ("color", "Palette: blue, peach, honey or sunset", "friends color peach"),
+        ],
+    ),
+    (
         "Other",
         [
-            ("path", "Show where the database lives", "friends path"),
             ("options", "List the options of every command", "friends options log"),
             ("help", "This overview, or full help of a command", "friends help log"),
         ],
@@ -406,7 +546,7 @@ def render_options(entries: list[tuple[str, str, list[OptionRow]]]) -> None:
         if index:
             table.add_row()
         summary = doc.strip().splitlines()[0] if doc.strip() else ""
-        table.add_row(Text(f"friends {name}", style="bold green"), Text(summary, style="dim"))
+        table.add_row(Text(f"friends {name}", style=theme()["accent"]), Text(summary, style="dim"))
         if not rows:
             table.add_row(Text("  (no options)", style="dim"), "")
         for row in rows:
@@ -419,9 +559,9 @@ def render_options(entries: list[tuple[str, str, list[OptionRow]]]) -> None:
 
 
 def render_help() -> None:
-    console.print("[bold cyan]friends[/] – keep in touch with the people who matter\n")
+    banner("keep in touch with the people who matter")
     table = Table(box=None, show_header=False, padding=(0, 2))
-    table.add_column(style="bold green", no_wrap=True)
+    table.add_column(style=theme()["accent"], no_wrap=True)
     table.add_column()
     table.add_column(style="dim", no_wrap=True)
     for index, (section, commands) in enumerate(HELP_SECTIONS):

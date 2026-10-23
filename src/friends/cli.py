@@ -2,6 +2,8 @@
 
 import enum
 import functools
+import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -17,6 +19,7 @@ from friends.errors import FriendsError, ValidationError
 from friends.interactions import history as load_history
 from friends.interactions import latest_manual, log_interaction
 from friends.models import Friend, Group, InteractionType
+from friends import sync
 from friends.ranking import load_statuses, priority_key, recommend, status_for
 from friends.services import (
     create_friend,
@@ -26,6 +29,8 @@ from friends.services import (
     resolve_friend,
     resolve_override,
 )
+from friends.settings import load_settings, save_setting, snapshot_path
+from friends.snapshot import read_snapshot, restore, write_snapshot
 from friends.ui import console, error, success, warn
 from friends import ui
 
@@ -93,6 +98,12 @@ def confirm_overwrite(path: Path, force: bool) -> None:
 
 def _plural(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
+def synced(message: str) -> None:
+    """After a change: refresh the snapshot and, if enabled, commit it. Never fails the command."""
+    for warning in sync.after_change(open_db(), message):
+        warn(warning)
 
 
 # --------------------------------------------------------------------------
@@ -170,9 +181,130 @@ def options(
 
 
 @app.command("path")
-def path_() -> None:
-    """Show the location of the database file."""
-    typer.echo(str(default_db_path()))
+@guard
+def path_(
+    new: Annotated[Path | None, typer.Argument(help="Move the database here (copied if it doesn't exist yet).")] = None,
+) -> None:
+    """Show where the database lives, or move it (e.g. into a synced folder).
+
+    [dim]Examples: friends path · friends path ~/Sync/friends.db[/]
+    """
+    if new is not None:
+        target = new.expanduser().resolve()
+        current = default_db_path()
+        if os.environ.get("FRIENDS_DB"):
+            warn("FRIENDS_DB is set and overrides the saved path for this run.")
+        if target != current:
+            if not target.exists() and current.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(current, target)
+            elif target.exists() and current.exists():
+                warn(f"{target} already exists; using it as is (the old file at {current} is untouched).")
+            save_setting("db", str(target))
+    typer.echo(str(default_db_path()))  # plain print so $(friends path) works
+
+
+# --------------------------------------------------------------------------
+# snapshot / restore / autocommit / style / color
+# --------------------------------------------------------------------------
+
+
+@app.command()
+@guard
+def snapshot(
+    file: Annotated[Path | None, typer.Option("--file", "-f", help="Set (and remember) where the snapshot lives.")] = None,
+) -> None:
+    """Write the YAML snapshot of all friends and contacts, for a private git repo.
+
+    The snapshot is rewritten automatically after every change once a file is set.
+
+    [dim]Examples: friends snapshot --file ~/Code/_tools/friends/data/friends.yaml · friends snapshot[/]
+    """
+    if file is not None:
+        save_setting("snapshot", str(file.expanduser().resolve()))
+    path = snapshot_path()
+    if path is None:
+        raise FriendsError("No snapshot file set. Run: friends snapshot --file <path/to/friends.yaml>")
+    with open_db().session() as session:
+        count = write_snapshot(session, path)
+    success(f"Snapshot of {_plural(count, 'friend')} written to {path}")
+
+
+@app.command("restore")
+@guard
+def restore_(
+    file: Annotated[Path | None, typer.Argument(help="Snapshot to read; default is the configured one.")] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for confirmation.")] = False,
+) -> None:
+    """Replace the database with the contents of a snapshot (new machine, or after a bad edit).
+
+    [dim]Examples: friends restore · friends restore ~/Downloads/friends.yaml[/]
+    """
+    path = file.expanduser() if file else snapshot_path()
+    if path is None:
+        raise FriendsError("No snapshot file set. Pass a path, or run: friends snapshot --file <path>")
+    records = read_snapshot(path)
+    with open_db().session() as session:
+        existing = len(load_statuses(session, clock.today()))
+        if existing and not yes and not typer.confirm(
+            f"Replace {_plural(existing, 'friend')} in the database with {_plural(len(records), 'friend')} from {path}?",
+            default=False,
+        ):
+            raise FriendsError("Cancelled.")
+        friends_count, contacts = restore(session, records)
+    success(f"Restored {_plural(friends_count, 'friend')} and {_plural(contacts, 'contact')} from {path}")
+    synced(f"friends restore {path.name}")  # the configured snapshot mirrors the database again
+
+
+def _setting(key: str, choices: dict[str, str] | list[str], label: str, value: str | None, default: str) -> None:
+    options = list(choices)
+    if value is not None:
+        if value not in options:
+            raise ValidationError(f"Unknown {label} {value!r}. Choose one of: {', '.join(options)}.")
+        save_setting(key, value)
+    current = load_settings().get(key, default)
+    current = current if current in options else default
+    console.print(f"{label}: [bold]{current}[/]   [dim](available: {', '.join(options)})[/]")
+
+
+@app.command()
+@guard
+def autocommit(
+    mode: Annotated[str | None, typer.Argument(help="off, on (commit the snapshot after each change) or push.")] = None,
+) -> None:
+    """Show or set whether the snapshot is git-committed after every change.
+
+    Needs a snapshot file inside a git repository (see 'friends snapshot --file').
+    Only the snapshot file is committed; other changes in that repo are left alone.
+
+    [dim]Examples: friends autocommit · friends autocommit on · friends autocommit push[/]
+    """
+    if mode in ("on", "push") and snapshot_path() is None:
+        raise FriendsError("Set a snapshot file first: friends snapshot --file <path/to/friends.yaml>")
+    _setting("autocommit", sync.AUTOCOMMIT_MODES, "autocommit", mode, "off")
+
+
+@app.command()
+@guard
+def style(name: Annotated[str | None, typer.Argument(help="plain, shadow or big.")] = None) -> None:
+    """Show or switch the banner style.
+
+    [dim]Examples: friends style · friends style big[/]
+    """
+    _setting("style", ui.STYLES, "banner style", name, ui.DEFAULT_STYLE)
+
+
+@app.command()
+@guard
+def color(name: Annotated[str | None, typer.Argument(help="blue, peach, honey or sunset.")] = None) -> None:
+    """Show or switch the colour palette.
+
+    [dim]Examples: friends color · friends color peach[/]
+    """
+    _setting("color", ui.THEMES, "colour", name, ui.DEFAULT_COLOR)
+
+
+app.command("colour", hidden=True)(color)
 
 
 # --------------------------------------------------------------------------
@@ -196,8 +328,10 @@ def next_(
     with open_db().session() as session:
         statuses = load_statuses(session, today)
     recs = recommend(statuses, group=selected, include_snoozed=all_, limit=None if all_ else limit)
-    title = "Who to contact next" + (f" · {selected.label}" if selected else "")
-    ui.render_next(recs, show_snoozed=all_, title=title)
+    pool = [s for s in statuses if selected is None or s.group == selected]
+    overdue = sum(1 for s in pool if s.is_due and not s.is_snoozed)
+    subtitle = (f"{selected.label} · " if selected else "") + f"{_plural(len(pool), 'friend')} · {overdue} overdue"
+    ui.render_next(recs, show_snoozed=all_, subtitle=subtitle)
 
 
 # --------------------------------------------------------------------------
@@ -265,6 +399,9 @@ def log(
                 f"{itype.label.capitalize()} with {friend.name} on {on.isoformat()} is already logged – skipped "
                 "[dim](use --force to log it again)[/]"
             )
+    logged = [o.friend.name for o in outcomes if o.logged]
+    if logged:
+        synced(f"friends log {', '.join(logged)}: {itype.label}")
 
 
 @app.command()
@@ -280,6 +417,7 @@ def undo(yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't ask for co
             raise FriendsError("Cancelled.")
         session.delete(interaction)
     success(f"Removed {label}.")
+    synced(f"friends undo {label}")
 
 
 # --------------------------------------------------------------------------
@@ -443,6 +581,7 @@ def add(
         if last_date:
             log_interaction(session, friend, itype, on=last_date, today=today, now=clock.now())
     success(f"Added [bold]{friend.name}[/] ({friend.group.label}, every {friend.interval} days).")
+    synced(f"friends add {friend.name}")
 
 
 @app.command()
@@ -490,6 +629,7 @@ def edit(
         session.flush()
         change = f" · interval {before}d → {friend.interval}d" if friend.interval != before else ""
     success(f"Updated [bold]{friend.name}[/] ({friend.group.label}, every {friend.interval} days){change}.")
+    synced(f"friends edit {friend.name}")
 
 
 @app.command()
@@ -509,6 +649,7 @@ def remove(
         friend_name = friend.name
         delete_friend(session, friend)
     success(f"Deleted {friend_name}.")
+    synced(f"friends remove {friend_name}")
 
 
 @app.command()
@@ -533,8 +674,10 @@ def snooze(
         friend.snoozed_until = until
     if until is None:
         success(f"{friend.name} is no longer snoozed.")
+        synced(f"friends snooze {friend.name} --clear")
     else:
         success(f"Snoozed [bold]{friend.name}[/] until {until.isoformat()} ({(until - today).days} days).")
+        synced(f"friends snooze {friend.name} until {until.isoformat()}")
 
 
 # --------------------------------------------------------------------------
@@ -595,6 +738,8 @@ def import_(
     ui.render_import(report)
     if not report.ok:
         raise typer.Exit(1)
+    if report.committed:
+        synced(f"friends import {path.name}")
 
 
 @app.command()

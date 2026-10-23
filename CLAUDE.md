@@ -6,7 +6,7 @@ Guidance for working on this repository. User-facing docs are in `README.md`.
 
 `friends` is a local-first Python CLI for keeping in touch with roughly 30–60 friends in different countries. It stores everything in SQLite and makes no network calls. It's a personal tool with one user, so prefer correctness, simplicity and maintainability over abstractions.
 
-Stack: Python 3.12+, uv, Typer, Rich, SQLAlchemy 2.x (ORM), platformdirs and pytest. The build backend is hatchling with a src layout. The executable is `friends`, mapped to `friends.cli:main`.
+Stack: Python 3.12+, uv, Typer, Rich, SQLAlchemy 2.x (ORM), platformdirs, PyYAML and pytest. The build backend is hatchling with a src layout. The executable is `friends`, mapped to `friends.cli:main`.
 
 ## Commands
 
@@ -21,10 +21,11 @@ uv tool install --reinstall .         # update the user's installed `friends` af
 **Never touch the user's real database during development or demos.** Always point at a scratch file:
 
 ```bash
-FRIENDS_DB=/tmp/x.db FRIENDS_TODAY=2026-10-11 COLUMNS=110 uv run friends import
+FRIENDS_DB=/tmp/x.db FRIENDS_CONFIG=/tmp/x-settings.yaml FRIENDS_TODAY=2026-10-11 COLUMNS=110 uv run friends import
 ```
 
-* `FRIENDS_DB` overrides the database path. The real one is in the platformdirs user data dir; on macOS that's `~/Library/Application Support/friends/friends.db`.
+* `FRIENDS_DB` overrides the database path. The real one is in the platformdirs user data dir; on macOS that's `~/Library/Application Support/friends/friends.db`, unless the user moved it with `friends path`.
+* `FRIENDS_CONFIG` overrides the settings file (`settings.yaml` in the platformdirs config dir, which on macOS is the same directory). **Always set it in demos**: the real file holds the user's snapshot path and autocommit mode, so a demo without it would rewrite and commit the user's real snapshot.
 * `FRIENDS_TODAY=YYYY-MM-DD` pins "today". It's read via `friends.clock`, and code must use `clock.today()` / `clock.now()`, never `date.today()`.
 * `COLUMNS` controls Rich's width when output isn't a TTY.
 
@@ -45,7 +46,10 @@ src/friends/
   ranking.py       FriendStatus (pure dataclass), load_statuses, rank, recommend
   csv_io.py        parse_csv, import_text/import_csv (reconciliation), write_export, write_template
   digest.py        Digest dataclass + to_markdown
-  ui.py            all Rich rendering + HELP_SECTIONS (command overview/order)
+  settings.py      settings.yaml: load_settings/save_setting; keys db, snapshot, autocommit, style, color
+  snapshot.py      YAML snapshot: dump_friends/to_yaml/write_snapshot, from_yaml/read_snapshot, restore
+  sync.py          after_change(db, message): rewrite the snapshot, then git commit/push if enabled
+  ui.py            all Rich rendering + THEMES/STYLES/banner + HELP_SECTIONS (command overview/order)
   cli.py           Typer commands only; thin glue
   dates.py, names.py, clock.py, errors.py
 tests/             pytest; conftest has db/session/make_friend/write_csv/cli fixtures
@@ -75,6 +79,14 @@ Only `cli.py` and `ui.py` know about the terminal. Keep application logic out of
   * Lookup stages: exact → folded exact → prefix → word prefix → all-words prefix → substring → UUID prefix.
   * Several matches go to the interactive chooser.
 
+## Snapshot and autocommit
+
+* The SQLite database is the working store. The YAML snapshot (`snapshot.py`) is a derived, human-readable copy meant for a private git repo (`data/` is gitignored for that).
+* Every CLI command that writes ends with `synced("friends <cmd> <who>")`, which calls `sync.after_change`. It does nothing unless a snapshot path is configured; with autocommit `on`/`push` it commits only the snapshot file. Git problems come back as warnings and never fail the command. **New mutating commands must call `synced`.** `restore` calls it too, so the configured snapshot always mirrors the database.
+* The snapshot keeps everything visible to the user and round-trips byte-for-byte (`test_round_trip_is_exact_and_idempotent`). Not kept: friend `created_at`/`updated_at`, manual interaction IDs. On restore, imported contacts get `imported_interaction_id()` back and `created_at` is set to `occurred_at` so `undo` still picks the newest contact.
+* Contact lines are hand-formatted flow mappings. The key is `date`, not `on`: YAML 1.1 reads a bare `on` as the boolean `True`. Notes are JSON-quoted, which is valid YAML for any content. PyYAML would quote timestamps in flow style, hence the hand formatting.
+* Friends are serialised one at a time (like each contact line) so untouched friends never change between saves and diffs stay one line per change.
+
 ## CSV import reconciliation (most important feature)
 
 * The headers are `Friend,Group,Location,Interval,Last contact`, plus an optional `ID` column.
@@ -95,6 +107,7 @@ Only `cli.py` and `ui.py` know about the terminal. Keep application logic out of
 * `friends path` uses `typer.echo`, not Rich, so `$(friends path)` never gets wrapped.
 * New commands must be added to `ui.HELP_SECTIONS`. That list drives `friends help`, the order of `friends options` and the "Unknown command" hint.
 * Rich tables wrap in narrow terminals. Use `no_wrap=True` on short value columns.
+* `theme()` and `banner()` read the settings file on every call. Tests isolate it through `FRIENDS_CONFIG` in the `cli` fixture.
 * Schema changes: there are no migrations yet. `create_all` plus `PRAGMA user_version` (`SCHEMA_VERSION` in `db.py`) is all there is. Adding columns to an existing user database needs a manual migration step.
 
 ## Conventions

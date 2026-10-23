@@ -11,3 +11,6 @@ friends_template.csv
 
 # Personal data – keep your own spreadsheet export out of version control
 /friends.csv
+
+# Private snapshot repo (see README: 'Keeping your data in a private repo')
+/data/

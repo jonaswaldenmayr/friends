@@ -50,6 +50,7 @@ def write_csv(tmp_path: Path):
 def cli(tmp_path: Path, monkeypatch):
     """Run CLI commands against a temporary database on a pinned date."""
     monkeypatch.setenv("FRIENDS_DB", str(tmp_path / "cli.db"))
+    monkeypatch.setenv("FRIENDS_CONFIG", str(tmp_path / "settings.yaml"))
     monkeypatch.setenv("FRIENDS_TODAY", TODAY.isoformat())
     monkeypatch.setenv("COLUMNS", "200")
     monkeypatch.chdir(tmp_path)
